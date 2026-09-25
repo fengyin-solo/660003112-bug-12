@@ -2,10 +2,49 @@
   <div class="bg-slate-800 rounded-lg p-4 border border-slate-700">
     <div class="flex items-center justify-between mb-3">
       <h3 class="text-sm font-bold text-slate-400">NFA 状态机可视化</h3>
-      <span v-if="store.nfa" class="text-xs text-slate-500">{{ store.nfa.states.length }} 状态 · {{ store.nfa.transitions.length }} 转移</span>
+      <div class="flex items-center gap-2">
+        <MatchBadge
+          v-if="store.matchResult"
+          :status="store.status"
+          :match-count="store.matchResult.matches.length"
+          :segment-count="store.matchResult.segmentCount"
+          :per-whitespace="store.matchResult.perWhitespace"
+        />
+        <span v-if="store.nfa" class="text-xs text-slate-500">{{ store.nfa.states.length }} 状态 · {{ store.nfa.transitions.length }} 转移</span>
+      </div>
     </div>
-    <canvas ref="canvasRef" width="800" height="500" class="w-full bg-slate-900 rounded-lg border border-slate-700"></canvas>
-    <div class="mt-2 flex gap-4 text-xs text-slate-500">
+
+    <!-- 与结果面板同源的当前片段提示 -->
+    <div class="mb-2 text-xs flex items-center gap-2 min-h-[20px]">
+      <template v-if="store.matchResult && store.matchResult.status === 'error'">
+        <span class="text-red-400">⚠ {{ store.matchResult.reason }}：{{ store.matchResult.errorMessage }}</span>
+      </template>
+      <template v-else-if="store.matchResult && store.matchResult.status === 'empty'">
+        <span class="text-slate-500">○ {{ store.matchResult.reason }}</span>
+      </template>
+      <template v-else-if="store.matchResult && store.matchResult.status === 'nomatch'">
+        <span class="text-red-400">✗ 暂无结果：{{ store.matchResult.reason }}</span>
+      </template>
+      <template v-else-if="step">
+        <span class="text-slate-500">步骤 {{ step.stepIndex }}</span>
+        <span class="text-slate-400">字符</span>
+        <span class="text-yellow-400 font-mono">'{{ step.char }}'</span>
+        <span class="text-slate-500">@{{ step.charIndex }}</span>
+        <span v-if="step.matchIndex >= 0" class="text-green-400">→ 片段 #{{ step.matchIndex + 1 }}</span>
+        <span v-else-if="step.isBacktrack" class="text-orange-400">→ 尝试 @{{ step.attemptStart }} ⚠ 回溯</span>
+        <span v-else class="text-slate-500">→ 推进中</span>
+      </template>
+      <span v-else class="text-slate-600">无步骤数据</span>
+    </div>
+
+    <div v-if="store.matchResult && store.matchResult.status === 'error'" class="w-full bg-slate-900 rounded-lg border border-red-900 h-[300px] flex flex-col items-center justify-center gap-3">
+      <div class="text-red-400 text-sm">无法构建状态机：正则表达式无效</div>
+      <div class="text-red-500/70 text-xs font-mono px-4 text-center break-all">{{ store.matchResult.errorMessage }}</div>
+      <button @click="store.execute()" class="px-3 py-1 bg-red-700 hover:bg-red-600 rounded text-xs text-white">↻ 重试</button>
+    </div>
+    <canvas v-else ref="canvasRef" width="800" height="500" class="w-full bg-slate-900 rounded-lg border border-slate-700"></canvas>
+
+    <div class="mt-2 flex flex-wrap gap-4 text-xs text-slate-500">
       <span><span class="inline-block w-3 h-3 rounded-full bg-cyan-500 mr-1"></span>起始状态</span>
       <span><span class="inline-block w-3 h-3 rounded-full bg-green-500 mr-1"></span>接受状态</span>
       <span><span class="inline-block w-3 h-3 rounded-full bg-orange-500 mr-1"></span>当前激活</span>
@@ -15,11 +54,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, watch, nextTick } from 'vue'
 import { useRegexStore } from '../store/regex'
+import MatchBadge from './MatchBadge.vue'
 
 const store = useRegexStore()
 const canvasRef = ref<HTMLCanvasElement | null>(null)
+
+const step = ref(store.currentStepData)
+watch(() => store.currentStepData, v => { step.value = v }, { deep: true })
 
 function draw() {
   const canvas = canvasRef.value
@@ -31,8 +74,8 @@ function draw() {
 
   const activeStates = new Set<number>()
   if (store.matchResult && store.currentStep < store.matchResult.steps.length) {
-    const step = store.matchResult.steps[store.currentStep]
-    if (step) { activeStates.add(step.currentState); activeStates.add(step.nextState) }
+    const s = store.matchResult.steps[store.currentStep]
+    if (s) { activeStates.add(s.currentState); if (s.nextState >= 0) activeStates.add(s.nextState) }
   }
 
   // Draw transitions
@@ -127,6 +170,6 @@ function draw() {
   })
 }
 
-onMounted(() => { draw() })
-watch(() => [store.nfa, store.currentStep], () => draw(), { deep: true })
+onMounted(() => { nextTick(draw) })
+watch(() => [store.nfa, store.currentStep, store.status], () => nextTick(draw), { deep: true })
 </script>
