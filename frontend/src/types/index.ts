@@ -31,10 +31,20 @@ export interface MatchStep {
   isMatch: boolean
 }
 
+export interface GroupSpan {
+  index: number // 0 = 整体匹配，1..n = 捕获分组
+  text: string
+  start: number // 在测试文本中的绝对起始索引，-1 表示该分组未参与匹配
+  end: number
+}
+
 export interface MatchResult {
   matched: boolean
   matchText: string
+  matchStart: number // 匹配在测试文本中的起始索引，未匹配为 -1
+  matchEnd: number
   groups: string[]
+  groupSpans: GroupSpan[]
   steps: MatchStep[]
   backtracks: number
   totalSteps: number

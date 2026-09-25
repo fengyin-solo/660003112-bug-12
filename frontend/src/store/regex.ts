@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { NFA, MatchResult, MatchStep, RegexTemplate, ASTNode } from '../types'
+import type { NFA, MatchResult, MatchStep, RegexTemplate, ASTNode, GroupSpan } from '../types'
 
 const GROUP_COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#3b82f6', '#8b5cf6', '#ec4899', '#14b8a6']
 
@@ -58,18 +58,34 @@ function buildNFA(pattern: string): { states: StateNode[]; startState: number; a
     states[from].epsilonTransitions.push(to)
   }
 
+  // 读取字符类中的一个字符，支持 \uXXXX 与转义字面量
+  function readClassChar(): string {
+    if (pattern[pos] === '\\') {
+      pos++
+      const e = pattern[pos]
+      if (e === 'u' && /^[0-9a-fA-F]{4}$/.test(pattern.slice(pos + 1, pos + 5))) {
+        const ch = String.fromCharCode(parseInt(pattern.slice(pos + 1, pos + 5), 16))
+        pos += 5
+        return ch
+      }
+      pos++
+      return e
+    }
+    return pattern[pos++]
+  }
+
   function parseCharClass(): (ch: string) => boolean {
     const negative = pattern[pos] === '^'
     if (negative) pos++
     const ranges: [string, string][] = []
     const chars: string[] = []
     while (pos < pattern.length && pattern[pos] !== ']') {
-      if (pattern[pos + 1] === '-' && pattern[pos + 2] && pattern[pos + 2] !== ']') {
-        ranges.push([pattern[pos], pattern[pos + 2]])
-        pos += 3
+      const c = readClassChar()
+      if (pattern[pos] === '-' && pos + 1 < pattern.length && pattern[pos + 1] !== ']') {
+        pos++ // skip -
+        ranges.push([c, readClassChar()])
       } else {
-        chars.push(pattern[pos])
-        pos++
+        chars.push(c)
       }
     }
     pos++ // skip ]
@@ -81,11 +97,24 @@ function buildNFA(pattern: string): { states: StateNode[]; startState: number; a
     }
   }
 
+  // 重新解析某个原子的源码片段，为 {n,m} 量词复制 NFA 片段
+  function parseFragment(src: string): [number, number] {
+    const savedPattern = pattern
+    const savedPos = pos
+    pattern = src
+    pos = 0
+    const [s, e] = parseConcat()
+    pattern = savedPattern
+    pos = savedPos
+    return [s, e]
+  }
+
   function parseConcat(): [number, number] {
     let start = newState()
     let end = start
     while (pos < pattern.length && !['|', ')'].includes(pattern[pos])) {
       let segStart: number, segEnd: number
+      const atomStart = pos
       const ch = pattern[pos]
       if (ch === '(') {
         pos++
@@ -106,7 +135,7 @@ function buildNFA(pattern: string): { states: StateNode[]; startState: number; a
         segEnd = newState()
         const matcher = parseCharClass()
         addTransition(segStart, '__class_' + segStart, segEnd)
-        ;(states[segEnd] as any)._matcher = matcher
+        ;(states[segStart] as any)._matcher = matcher
       } else if (ch === '.') {
         segStart = newState()
         segEnd = newState()
@@ -120,6 +149,10 @@ function buildNFA(pattern: string): { states: StateNode[]; startState: number; a
         if (escaped === 'd') addTransition(segStart, '__digit', segEnd)
         else if (escaped === 'w') addTransition(segStart, '__word', segEnd)
         else if (escaped === 's') addTransition(segStart, '__space', segEnd)
+        else if (escaped === 'u' && /^[0-9a-fA-F]{4}$/.test(pattern.slice(pos + 1, pos + 5))) {
+          addTransition(segStart, String.fromCharCode(parseInt(pattern.slice(pos + 1, pos + 5), 16)), segEnd)
+          pos += 4
+        }
         else addTransition(segStart, escaped, segEnd)
         pos++
       } else if (ch === '^' || ch === '$') {
@@ -133,15 +166,56 @@ function buildNFA(pattern: string): { states: StateNode[]; startState: number; a
         pos++
       }
 
+      const atomSrc = pattern.slice(atomStart, pos)
+
       // Handle quantifiers
       while (pos < pattern.length && ['*', '+', '?', '{'].includes(pattern[pos])) {
         const q = pattern[pos]
         if (q === '{') {
-          while (pos < pattern.length && pattern[pos] !== '}') pos++
-          pos++
-        } else {
-          pos++
+          const qm = /^\{(\d+)(?:,(\d*))?\}/.exec(pattern.slice(pos))
+          if (!qm) break // 非法量词，'{' 按字面字符处理
+          const min = parseInt(qm[1], 10)
+          const max = qm[2] === undefined ? min : (qm[2] === '' ? Infinity : parseInt(qm[2], 10))
+          pos += qm[0].length
+          // 已有第 1 份实例 [segStart, segEnd]，按需链接其余副本
+          let chainStart: number, chainEnd: number
+          if (min === 0) {
+            const qs = newState(), qe = newState()
+            addEpsilon(qs, segStart); addEpsilon(qs, qe); addEpsilon(segEnd, qe)
+            chainStart = qs; chainEnd = qe
+          } else {
+            chainStart = segStart; chainEnd = segEnd
+          }
+          for (let k = 1; k < min; k++) {
+            const [cs, ce] = parseFragment(atomSrc)
+            addEpsilon(chainEnd, cs)
+            chainEnd = ce
+          }
+          if (max === Infinity) {
+            if (min === 0) {
+              addEpsilon(segEnd, segStart) // {0,} 等价于 *
+            } else {
+              const [cs, ce] = parseFragment(atomSrc)
+              const qs = newState(), qe = newState()
+              addEpsilon(qs, cs); addEpsilon(qs, qe); addEpsilon(ce, cs); addEpsilon(ce, qe)
+              addEpsilon(chainEnd, qs)
+              chainEnd = qe
+            }
+          } else {
+            const optCount = max - Math.max(min, 1)
+            for (let k = 0; k < optCount; k++) {
+              const [cs, ce] = parseFragment(atomSrc)
+              const qs = newState(), qe = newState()
+              addEpsilon(qs, cs); addEpsilon(qs, qe); addEpsilon(ce, qe)
+              addEpsilon(chainEnd, qs)
+              chainEnd = qe
+            }
+          }
+          segStart = chainStart; segEnd = chainEnd
+          if (pos < pattern.length && pattern[pos] === '?') pos++ // lazy
+          continue
         }
+        pos++
         const qStart = newState()
         const qEnd = newState()
         addEpsilon(qStart, segStart)
@@ -208,7 +282,48 @@ function matchTransition(state: StateNode, symbol: string): number[] {
   return results
 }
 
-function runMatch(states: StateNode[], startState: number, input: string): MatchResult {
+// 可视化引擎将 ^/$ 视为零宽断言忽略，提取分组时同步去除，保证与 NFA 匹配位置一致
+function stripAnchors(p: string): string {
+  let out = ''
+  let inClass = false
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i]
+    if (c === '\\') { out += c + (p[i + 1] ?? ''); i++; continue }
+    if (c === '[') inClass = true
+    else if (c === ']') inClass = false
+    else if ((c === '^' || c === '$') && !inClass) continue
+    out += c
+  }
+  return out
+}
+
+// 借助原生 RegExp 的捕获索引计算各分组在测试文本中的精确位置。
+// 仅当原生匹配位置、文本与 NFA 结果完全一致时才采用，否则回退为仅整体匹配，
+// 避免文本中出现重复片段时分组定位串位。
+function computeGroupSpans(pattern: string, input: string, matchStart: number, matchText: string): GroupSpan[] {
+  const spans: GroupSpan[] = [{ index: 0, text: matchText, start: matchStart, end: matchStart + matchText.length }]
+  try {
+    const re = new RegExp(stripAnchors(pattern), 'gd')
+    for (let guard = 0; guard < 1000; guard++) {
+      const m = re.exec(input) as (RegExpExecArray & { indices?: Array<[number, number] | undefined> }) | null
+      if (!m || m.index > matchStart) break
+      if (m.index === matchStart && m[0] === matchText && m.indices) {
+        for (let i = 1; i < m.length; i++) {
+          const idx = m.indices[i]
+          if (!idx) spans.push({ index: i, text: '', start: -1, end: -1 })
+          else spans.push({ index: i, text: input.slice(idx[0], idx[1]), start: idx[0], end: idx[1] })
+        }
+        return spans
+      }
+      if (m[0] === '') re.lastIndex++
+    }
+  } catch {
+    // 原生引擎不支持的语法：仅展示整体匹配
+  }
+  return spans
+}
+
+function runMatch(states: StateNode[], startState: number, input: string, pattern: string): MatchResult {
   const steps: MatchStep[] = []
   let backtracks = 0
   let stepIndex = 0
@@ -270,10 +385,14 @@ function runMatch(states: StateNode[], startState: number, input: string): Match
     if (matched || (startPos === input.length && currentStates.some(s => states[s].isAccept))) {
       const matchText = input.substring(startPos, matchEnd)
       const duration = performance.now() - startTime
+      const groupSpans = computeGroupSpans(pattern, input, startPos, matchText)
       return {
         matched: true,
         matchText,
-        groups: [matchText],
+        matchStart: startPos,
+        matchEnd,
+        groups: groupSpans.map(g => g.text),
+        groupSpans,
         steps,
         backtracks,
         totalSteps: stepIndex,
@@ -283,7 +402,7 @@ function runMatch(states: StateNode[], startState: number, input: string): Match
   }
 
   const duration = performance.now() - startTime
-  return { matched: false, matchText: '', groups: [], steps, backtracks, totalSteps: stepIndex, duration: Math.round(duration * 100) / 100 }
+  return { matched: false, matchText: '', matchStart: -1, matchEnd: -1, groups: [], groupSpans: [], steps, backtracks, totalSteps: stepIndex, duration: Math.round(duration * 100) / 100 }
 }
 
 export function computeNFA(nfaResult: ReturnType<typeof buildNFA>): NFA {
@@ -401,27 +520,43 @@ export const useRegexStore = defineStore('regex', () => {
   const ast = ref<ASTNode | null>(null)
   const error = ref('')
   const selectedTemplate = ref<string>('')
+  const selectedGroup = ref<number | null>(null)
 
   const groupColors = GROUP_COLORS
 
-  const matchHighlight = computed(() => {
-    if (!matchResult.value || !matchResult.value.matched) return null
-    const matchText = matchResult.value.matchText
-    const idx = testString.value.indexOf(matchText)
-    if (idx === -1) return null
-    return {
-      before: testString.value.substring(0, idx),
-      match: matchText,
-      after: testString.value.substring(idx + matchText.length)
-    }
+  // 当前模式包含可视化引擎暂不支持的语法时给出说明，避免误判匹配结果
+  const unsupportedNote = computed(() => {
+    const p = pattern.value
+    const notes: string[] = []
+    if (/\(\?[!=]/.test(p) || /\(\?<[!=]/.test(p)) notes.push('零宽断言（前瞻/后瞻）')
+    if (/\\[1-9]/.test(p)) notes.push('反向引用')
+    if (!notes.length) return ''
+    return `当前引擎暂不支持：${notes.join('、')}，匹配结果可能与标准正则引擎不一致`
   })
+
+  // 分组颜色唯一出处：按分组序号取色，保证返回、切换模板、重新执行后颜色稳定
+  function groupColor(index: number): string {
+    return GROUP_COLORS[index % GROUP_COLORS.length]
+  }
+
+  function selectGroup(index: number) {
+    selectedGroup.value = selectedGroup.value === index ? null : index
+  }
 
   function execute() {
     error.value = ''
+    selectedGroup.value = null
+    if (!pattern.value) {
+      nfa.value = null
+      matchResult.value = null
+      ast.value = null
+      error.value = '正则表达式为空，请输入要调试的模式'
+      return
+    }
     try {
       const built = buildNFA(pattern.value)
       nfa.value = computeNFA(built)
-      matchResult.value = runMatch(built.states, built.startState, testString.value)
+      matchResult.value = runMatch(built.states, built.startState, testString.value, pattern.value)
       ast.value = parseAST(pattern.value)
       currentStep.value = 0
     } catch (e: any) {
@@ -481,8 +616,8 @@ export const useRegexStore = defineStore('regex', () => {
 
   return {
     pattern, testString, currentStep, isPlaying, nfa, matchResult, ast, error,
-    selectedTemplate, groupColors, matchHighlight,
-    execute, setPattern, setTestString, applyTemplate,
+    selectedTemplate, selectedGroup, groupColors, groupColor, unsupportedNote,
+    execute, setPattern, setTestString, applyTemplate, selectGroup,
     stepForward, stepBackward, resetStep, play, stop
   }
 })

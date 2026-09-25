@@ -19,12 +19,31 @@
       <div class="lg:w-1/4 space-y-4">
         <div class="bg-slate-800 rounded-lg p-4 border border-slate-700">
           <h3 class="text-sm font-bold text-slate-400 mb-3">匹配统计</h3>
-          <div v-if="store.matchResult" class="space-y-2 text-sm">
+          <div v-if="store.error" class="space-y-2 text-sm">
+            <div class="text-red-400">✗ 解析失败</div>
+            <div class="text-red-300/70 text-xs break-all">{{ store.error }}</div>
+            <button @click="store.execute()" class="px-3 py-1 bg-red-600 hover:bg-red-500 rounded text-xs text-white">⟳ 重试</button>
+          </div>
+          <div v-else-if="store.matchResult" class="space-y-2 text-sm">
             <div class="flex justify-between"><span class="text-slate-500">匹配状态</span><span :class="store.matchResult.matched ? 'text-green-400' : 'text-red-400'">{{ store.matchResult.matched ? '✓ 匹配成功' : '✗ 未匹配' }}</span></div>
             <div class="flex justify-between"><span class="text-slate-500">匹配文本</span><span class="text-cyan-400 font-mono truncate ml-2">{{ store.matchResult.matchText || '—' }}</span></div>
+            <div class="flex justify-between"><span class="text-slate-500">匹配位置</span><span class="text-slate-300">{{ store.matchResult.matched ? store.matchResult.matchStart + ' - ' + store.matchResult.matchEnd : '—' }}</span></div>
             <div class="flex justify-between"><span class="text-slate-500">总步数</span><span class="text-slate-300">{{ store.matchResult.totalSteps }}</span></div>
             <div class="flex justify-between"><span class="text-slate-500">回溯次数</span><span :class="store.matchResult.backtracks > 0 ? 'text-orange-400 font-bold' : 'text-slate-300'">{{ store.matchResult.backtracks }}</span></div>
             <div class="flex justify-between"><span class="text-slate-500">耗时(ms)</span><span class="text-slate-300">{{ store.matchResult.duration }}</span></div>
+            <!-- 分组标注：与结果高亮面板使用同一颜色映射 -->
+            <div v-if="store.matchResult.matched && store.matchResult.groupSpans.length" class="pt-2 border-t border-slate-700">
+              <div class="text-slate-500 mb-1.5">分组标注</div>
+              <div class="flex flex-wrap gap-1">
+                <span v-for="g in store.matchResult.groupSpans" :key="g.index"
+                  @click="store.selectGroup(g.index)"
+                  :class="['inline-flex items-center gap-1 text-xs px-1.5 py-0.5 rounded bg-slate-900 cursor-pointer', store.selectedGroup === g.index ? 'ring-1 ring-cyan-400' : '']">
+                  <span class="inline-block w-2.5 h-2.5 rounded-sm" :style="{ backgroundColor: store.groupColor(g.index) }"></span>
+                  <span class="text-slate-400">G{{ g.index }}</span>
+                  <span class="text-slate-300 font-mono max-w-24 truncate">{{ g.text || '∅' }}</span>
+                </span>
+              </div>
+            </div>
           </div>
           <div v-else class="text-slate-500 text-sm">点击"执行匹配"开始</div>
         </div>
@@ -46,7 +65,7 @@
           <div v-if="store.matchResult && store.matchResult.steps[store.currentStep]" class="space-y-1 text-sm">
             <div>字符索引: <span class="text-cyan-400">{{ store.matchResult.steps[store.currentStep].charIndex }}</span></div>
             <div>当前字符: <span class="text-yellow-400 font-mono">'{{ store.matchResult.steps[store.currentStep].char }}'</span></div>
-            <div>状态转换: <span class="text-green-400">{{ store.matchResult.steps[store.currentStep].currentState }}</span> → <span class="text-blue-400">{{ store.matchResult.steps[store.currentStep].nextState }}</span></div>
+            <div>状态转换: <span class="text-green-400">{{ store.matchResult.steps[store.currentStep].currentState }}</span> → <span class="text-blue-400">{{ store.matchResult.steps[store.currentStep].nextState === -1 ? '失败' : store.matchResult.steps[store.currentStep].nextState }}</span></div>
             <div>转移符号: <span class="text-purple-400 font-mono">{{ store.matchResult.steps[store.currentStep].transition }}</span></div>
             <div v-if="store.matchResult.steps[store.currentStep].isBacktrack" class="text-orange-400 font-bold">⚠ 回溯发生</div>
           </div>

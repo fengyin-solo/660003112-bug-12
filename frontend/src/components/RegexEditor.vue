@@ -14,6 +14,7 @@
       <span class="absolute right-3 top-2 text-cyan-500 font-bold text-lg">/g</span>
     </div>
     <div v-if="store.error" class="mt-2 text-red-400 text-sm">⚠ {{ store.error }}</div>
+    <div v-else-if="store.unsupportedNote" class="mt-2 text-yellow-400/90 text-xs">⚠ {{ store.unsupportedNote }}</div>
     <textarea
       v-model="localTestString"
       @input="onTestInput"
@@ -26,12 +27,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { useRegexStore } from '../store/regex'
 
 const store = useRegexStore()
 const localPattern = ref(store.pattern)
 const localTestString = ref(store.testString)
+
+// 切换模板等外部修改后，输入框与 store 保持同步
+watch(() => store.pattern, p => { localPattern.value = p })
+watch(() => store.testString, s => { localTestString.value = s })
 
 let debounceTimer: ReturnType<typeof setTimeout>
 function onInput() {
